@@ -199,14 +199,15 @@ int main (int argc, char *argv[]) {
     if ((c = libnet_write(llif))==-1)
       errx(1, "Write error: %s\n", libnet_geterror(llif));
     if(verbose)
-      fprintf(stderr, "Nr: %d | SRC-IP:Port: %s:%d | DST-IP:Port %s:%d |"
-        " SRC-MAC: %d | DST-MAC: %d\n", i,
+      fprintf(stderr, "Nr: %d | SRC-IP:Port: %s:%d | DST-IP:Port %s:%d \n",
+          i,
           libnet_addr2name4(rand_src, mode),
           sport,
           libnet_addr2name4(rand_dst, mode),
-          dport,
-          ether_ntoa((struct ether_addr *)smaca),
-          ether_ntoa((struct ether_addr *)dmaca)
+          dport
+      // FIXME: MAC-Output
+      //    ether_ntoa((struct ether_addr *)smaca),
+      //    ether_ntoa((struct ether_addr *)dmaca)
       );
 
     libnet_destroy(llif);
