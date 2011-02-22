@@ -1,0 +1,6 @@
+=== README ===
+Compile with 
+	'gcc -lnet -lpcap macflood.c'
+
+you need the sourcecode of libnet and libpcap.
+
