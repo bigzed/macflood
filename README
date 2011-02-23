@@ -1,6 +1,9 @@
-=== README ===
-Compile with 
-	'gcc -lnet -lpcap macflood.c'
+== README
 
-you need the sourcecode of libnet and libpcap.
+  Run make to compile macflood but ensure you have >=libnet 1.1.4
+  and >=libpcap 1.1.1.
+
+  Usage macflood [-v] [-t threads] [-p process][-i interface] [-n times]
+  Example: macflood -t 10 -p 2 -i eth0 -n 200000
+    this will use 2 processes with each 10 threads to send 200k packages.
 
